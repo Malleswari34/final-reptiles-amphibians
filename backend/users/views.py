@@ -1,0 +1,670 @@
+import os
+import random
+import json
+import base64
+import numpy as np
+import tensorflow as tf
+from io import BytesIO
+from django.conf import settings
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.shortcuts import render, redirect
+from django.core.files.storage import default_storage
+from django.contrib import messages
+
+# TensorFlow/Keras Imports (Heavy)
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, decode_predictions
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
+from tensorflow.keras.models import load_model, Model
+from tensorflow.keras.layers import Dense, Dropout, DepthwiseConv2D
+from tensorflow.keras.optimizers import Adam
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Constants
+CLASS_NAMES = [
+    'Chameleon', 'Crocodile_Alligator', 'Frog', 'Gecko', 'Iguana',
+    'Lizard', 'Salamander', 'Snake', 'Toad', 'Turtle_Tortoise'
+]
+
+# ─── MODEL CACHING ────────────────────────────────────────────────────────────
+class ModelCache:
+    _inet_model = None
+    _custom_model = None
+
+    @classmethod
+    def get_inet_model(cls):
+        if cls._inet_model is None:
+            print("🚀 PRE-LOADING: ImageNet Filter Model...")
+            cls._inet_model = MobileNetV2(weights='imagenet', include_top=True)
+        return cls._inet_model
+
+    @classmethod
+    def get_custom_model(cls):
+        if cls._custom_model is None:
+            model_path = os.path.join(settings.BASE_DIR, 'animal_classification_model.h5')
+            if os.path.exists(model_path):
+                print(f"🚀 PRE-LOADING: Custom Animal Model from {model_path}...")
+                
+                # Handling custom layers for MobileNet loading
+                class FixedDepthwiseConv2D(DepthwiseConv2D):
+                    def __init__(self, **kwargs):
+                        kwargs.pop('groups', None)
+                        super().__init__(**kwargs)
+                
+                cls._custom_model = load_model(
+                    model_path, compile=False,
+                    custom_objects={'DepthwiseConv2D': FixedDepthwiseConv2D}
+                )
+            else:
+                print("⚠️  WARNING: Custom model file not found!")
+        return cls._custom_model
+
+def Training(request):
+    # Set dataset and model paths
+    dataset_path = os.path.join(settings.BASE_DIR, 'media\\archive')
+    model_path = os.path.join(settings.BASE_DIR, 'animal_classification_model.h5')
+    checkpoint_path = os.path.join(settings.BASE_DIR, 'animals_classification_model_checkpoint')
+    
+    # Check if retrain parameter is set in the request
+    retrain = request.GET.get('retrain', 'false').lower() == 'true'
+
+    # Check if model already exists
+    if os.path.exists(model_path) and not retrain:
+        # Instead of just returning a message, we now provide the results!
+        print("DEBUG: Model exists. Evaluating to show results.")
+        model = ModelCache.get_custom_model()
+        if not model:
+             model = tf.keras.models.load_model(model_path, compile=False)
+        
+        # Load test images for evaluation (fast metadata only)
+        test_generator = ImageDataGenerator(preprocessing_function=preprocess_input)
+        test_images = test_generator.flow_from_directory(
+            dataset_path, target_size=(224, 224), batch_size=32,
+            class_mode='categorical', shuffle=False
+        )
+        
+        # Re-evaluate once to get the metrics for the UI
+        results = model.evaluate(test_images, verbose=0)
+        accuracy = results[1] * 100
+        
+        # Re-generate the metrics and context
+        y_pred = model.predict(test_images, verbose=0)
+        y_pred_classes = np.argmax(y_pred, axis=1)
+        y_true = test_images.classes
+        class_names_local = list(test_images.class_indices.keys())
+        
+        report = classification_report(y_true, y_pred_classes, target_names=class_names_local, output_dict=True)
+        report_str = classification_report(y_true, y_pred_classes, target_names=class_names_local)
+        conf_matrix = confusion_matrix(y_true, y_pred_classes)
+
+        report_list = []
+        for label, metrics_item in report.items():
+            if isinstance(metrics_item, dict):
+                report_list.append({
+                    'label': label,
+                    'precision': metrics_item.get('precision', 0),
+                    'recall': metrics_item.get('recall', 0),
+                    'f1_score': metrics_item.get('f1-score', 0),
+                    'support': metrics_item.get('support', 0)
+                })
+
+        # Generate images for the UI
+        def get_base64_img():
+            buffer = BytesIO()
+            plt.savefig(buffer, format="png")
+            buffer.seek(0)
+            img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            buffer.close()
+            plt.clf()
+            return img_b64
+
+        # Plot confusion matrix
+        plt.figure(figsize=(8, 6))
+        sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_names_local, yticklabels=class_names_local)
+        plt.xlabel('Predicted Labels'); plt.ylabel('True Labels'); plt.title('Confusion Matrix')
+        plt.tight_layout()
+        conf_matrix_base64 = get_base64_img()
+
+        # Dummy/Empty plots for accuracy/loss since we don't have historical 'history' object here
+        # (Alternatively, we could just send a placeholder or skip, but UI expects them)
+        plt.figure(figsize=(8, 4))
+        plt.text(0.5, 0.5, 'History data only available immediately after training', ha='center')
+        plt.title('Training History (Session Only)')
+        placeholder_img = get_base64_img()
+
+        message = "Loaded existing model results."
+        context = {
+            'accuracy': accuracy,
+            'report_list': report_list,
+            'report_str': report_str,
+            'conf_matrix_image': conf_matrix_base64,
+            'accuracy_image': placeholder_img,
+            'loss_image': placeholder_img,
+            'message': message,
+            'existing_results': True
+        }
+        
+        if 'application/json' in request.headers.get('Accept', ''):
+             return JsonResponse({'status': 'success', **context})
+
+        return render(request, 'users/accuracy.html', context)
+
+    # Image data preprocessing
+    BATCH_SIZE = 32
+    IMAGE_SIZE = (224, 224)
+
+    # Enhanced Data Augmentation for better generalization
+    train_generator = ImageDataGenerator(
+        preprocessing_function=tf.keras.applications.mobilenet_v2.preprocess_input,
+        validation_split=0.2,
+        rotation_range=40,      # Increased for better angles
+        width_shift_range=0.3,
+        height_shift_range=0.3,
+        shear_range=0.3,
+        zoom_range=0.3,         # Better for zoomed-in photos
+        horizontal_flip=True,
+        vertical_flip=True,     # Amphibians/Reptiles can be upside down in photos
+        brightness_range=[0.7, 1.3], # Handle different lighting
+        fill_mode='nearest'
+    )
+    
+    # Validation generator should ONLY have preprocessing
+    val_generator = ImageDataGenerator(
+        preprocessing_function=tf.keras.applications.mobilenet_v2.preprocess_input,
+        validation_split=0.2
+    )
+
+    test_generator = ImageDataGenerator(
+        preprocessing_function=tf.keras.applications.mobilenet_v2.preprocess_input
+    )
+
+    # Flow images from directory
+    train_images = train_generator.flow_from_directory(
+        dataset_path, 
+        target_size=IMAGE_SIZE, 
+        batch_size=BATCH_SIZE, 
+        class_mode='categorical', 
+        subset='training'
+    )
+    val_images = val_generator.flow_from_directory(
+        dataset_path, 
+        target_size=IMAGE_SIZE, 
+        batch_size=BATCH_SIZE, 
+        class_mode='categorical', 
+        subset='validation'
+    )
+    test_images = test_generator.flow_from_directory(
+        dataset_path, 
+        target_size=IMAGE_SIZE, 
+        batch_size=BATCH_SIZE, 
+        class_mode='categorical', 
+        shuffle=False
+    )
+
+    # Load or build the model
+    if os.path.exists(model_path):
+        # We load weights but re-compile to use updated optimizer/parameters
+        model = load_model(model_path, compile=False)
+    else:
+        pretrained_model = MobileNetV2(input_shape=(224, 224, 3), include_top=False, weights='imagenet', pooling='avg')
+        # We fine-tune the last few layers for better "outside" image recognition
+        pretrained_model.trainable = True
+        for layer in pretrained_model.layers[:-20]:
+            layer.trainable = False
+            
+        x = Dense(512, activation='relu')(pretrained_model.output)
+        x = Dropout(0.4)(x) # Higher dropout to prevent overfitting to dataset
+        x = Dense(256, activation='relu')(x)
+        x = Dropout(0.2)(x)
+        outputs = Dense(train_images.num_classes, activation='softmax')(x)
+        model = Model(inputs=pretrained_model.input, outputs=outputs)
+
+    model.compile(optimizer=Adam(learning_rate=0.0001), loss='categorical_crossentropy', metrics=['accuracy'])
+
+    # Callbacks
+    checkpoint_callback = ModelCheckpoint(checkpoint_path, save_weights_only=True, monitor='val_accuracy', save_best_only=True)
+    early_stopping = EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True)
+
+    # Training the model
+    # Higher epochs (25) + smaller learning rate for precision
+    history = model.fit(train_images, epochs=25, validation_data=val_images, callbacks=[checkpoint_callback, early_stopping])
+    model.save(model_path)
+
+    # Evaluate on test data
+    results = model.evaluate(test_images, verbose=0)
+    accuracy = results[1] * 100
+
+    # Generate metrics and graphs
+    y_pred = model.predict(test_images)
+    y_pred_classes = np.argmax(y_pred, axis=1)
+    y_true = test_images.classes
+
+    class_names = list(test_images.class_indices.keys())
+    report = classification_report(y_true, y_pred_classes, target_names=class_names, output_dict=True)
+    report_str = classification_report(y_true, y_pred_classes,target_names=class_names)
+    conf_matrix = confusion_matrix(y_true, y_pred_classes)
+   
+    report_list = []
+    for label, metrics in report.items():
+        if isinstance(metrics, dict):  # Ensure it's a valid class entry
+            report_list.append({
+                'label': label,
+                'precision': metrics.get('precision', 0),
+                'recall': metrics.get('recall', 0),
+                'f1_score': metrics.get('f1-score', 0),
+                'support': metrics.get('support', 0)
+            })
+ 
+    
+
+   
+
+    # Plot confusion matrix
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.title('Confusion Matrix')
+    plt.tight_layout()
+    buffer = BytesIO()
+    plt.savefig(buffer, format="png")
+    buffer.seek(0)
+    conf_matrix_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    buffer.close()
+    plt.clf()
+
+    # Plot training and validation accuracy
+    epochs = range(len(history.history['accuracy']))
+    plt.plot(epochs, history.history['accuracy'], label='Training Accuracy')
+    plt.plot(epochs, history.history['val_accuracy'], label='Validation Accuracy')
+    plt.legend()
+    plt.title('Training and Validation Accuracy')
+    buffer = BytesIO()
+    plt.savefig(buffer, format="png")
+    buffer.seek(0)
+    accuracy_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    buffer.close()
+    plt.clf()
+
+    # Plot training and validation loss
+    plt.plot(epochs, history.history['loss'], label='Training Loss')
+    plt.plot(epochs, history.history['val_loss'], label='Validation Loss')
+    plt.legend()
+    plt.title('Training and Validation Loss')
+    buffer = BytesIO()
+    plt.savefig(buffer, format="png")
+    buffer.seek(0)
+    loss_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    buffer.close()
+    plt.clf()
+   
+    # Render results to HTML
+    context = {
+        'accuracy': accuracy,
+        'report_list': report_list,
+        'conf_matrix_image': conf_matrix_base64,
+        'accuracy_image': accuracy_base64,
+        'loss_image': loss_base64,
+        'report_str': report_str # Added report_str to context for HTML rendering
+    }
+
+    if 'application/json' in request.headers.get('Accept', ''):
+        return JsonResponse({
+            'status': 'success',
+            'accuracy': accuracy,
+            'report_list': report_list,
+            'conf_matrix_image': conf_matrix_base64,
+            'accuracy_image': accuracy_base64,
+            'loss_image': loss_base64,
+            'report_str': report_str # Added report_str to JSON response
+        })
+
+    return render(request, 'users/accuracy.html', context)
+
+
+
+from django.core.files.storage import default_storage
+
+# Mapping of animal names to their category (Reptile or Amphibian)
+ANIMAL_CATEGORY_MAP = {
+    # Reptiles
+    'chameleon': 'Reptile',
+    'snake': 'Reptile',
+    'lizard': 'Reptile',
+    'crocodile': 'Reptile',
+    'turtle': 'Reptile',
+    'tortoise': 'Reptile',
+    'monitor': 'Reptile',
+    'monitor lizard': 'Reptile',
+    'gecko': 'Reptile',
+    'iguana': 'Reptile',
+    'alligator': 'Reptile',
+    'komodo': 'Reptile',
+    'komodo dragon': 'Reptile',
+    'skink': 'Reptile',
+    'viper': 'Reptile',
+    'cobra': 'Reptile',
+    'python': 'Reptile',
+    'boa': 'Reptile',
+    'caiman': 'Reptile',
+    # Amphibians
+    'frog': 'Amphibian',
+    'toad': 'Amphibian',
+    'salamander': 'Amphibian',
+    'newt': 'Amphibian',
+    'axolotl': 'Amphibian',
+    'caecilian': 'Amphibian',
+    'tree frog': 'Amphibian',
+    'bullfrog': 'Amphibian',
+    'mudpuppy': 'Amphibian',
+}
+
+def get_category(animal_name):
+    """Return the category (Reptile/Amphibian) for a given animal name."""
+    name_lower = animal_name.lower()
+    for key, category in ANIMAL_CATEGORY_MAP.items():
+        if key in name_lower:
+            return category
+    return 'Unknown'
+
+# ImageNet class name keywords that correspond to reptiles or amphibians
+IMAGENET_REPTILE_AMPHIBIAN_KEYWORDS = [
+    # Amphibians
+    'frog', 'toad', 'salamander', 'newt', 'axolotl', 'bullfrog', 'tree_frog',
+    'tree frog', 'caecilian', 'mudpuppy', 'tailed_frog', 'common_newt', 'spotted_salamander',
+    # Reptiles
+    'snake', 'lizard', 'gecko', 'iguana', 'chameleon', 'crocodile', 'alligator',
+    'turtle', 'tortoise', 'skink', 'viper', 'cobra', 'boa', 'python', 'caiman',
+    'monitor', 'komodo', 'agama', 'whiptail', 'sidewinder', 'horned_viper',
+    'thunder_snake', 'ringneck_snake', 'hognose_snake', 'green_snake',
+    'king_snake', 'garter_snake', 'water_snake', 'vine_snake', 'night_snake',
+    'boa_constrictor', 'rock_python', 'indian_cobra', 'green_mamba',
+    'sea_snake', 'diamondback', 'cottonmouth', 'leatherback_turtle',
+    'loggerhead', 'mud_turtle', 'terrapin', 'box_turtle', 'banded_gecko',
+    'common_iguana', 'american_chameleon', 'frilled_lizard', 'alligator_lizard',
+    'gila_monster', 'green_lizard', 'african_chameleon', 'komodo_dragon',
+    'african_crocodile', 'american_alligator', 'softshell_turtle',
+    'spiny_lizard', 'nile_crocodile', 'agama', 'sidewinder', 'rattlesnake',
+]
+
+
+
+def is_reptile_or_amphibian_imagenet(img_full_path):
+    """
+    Run MobileNetV2 (ImageNet weights) on the image and check if any of
+    the top-10 predicted classes belong to reptile / amphibian groups.
+    Returns True if it is a reptile/amphibian, False otherwise.
+    """
+    # Clear non-reptile categories to hard-reject
+    NON_REPTILE_KEYWORDS = [
+        'mushroom', 'fungus', 'agaric', 'coral_fungus', 'hen_of_wood',
+        'earthstar', 'stinkhorn', 'gyromitra',
+        'person', 'people', 'man', 'woman', 'boy', 'girl', 'human',
+        'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'van',
+        'cat', 'dog', 'bird', 'fish', 'insect', 'butterfly', 'bee',
+        'flower', 'plant', 'tree', 'vegetable', 'fruit', 'food', 'pizza',
+        'phone', 'laptop', 'computer', 'keyboard', 'bottle', 'cup',
+    ]
+
+    inet_model = ModelCache.get_inet_model()
+
+    inet_img   = load_img(img_full_path, target_size=(224, 224))
+    inet_array = img_to_array(inet_img)
+    inet_array = np.expand_dims(inet_array, axis=0)
+    inet_array = preprocess_input(inet_array)
+
+    preds     = inet_model.predict(inet_array, verbose=0)
+    top_preds = decode_predictions(preds, top=10)[0]   # Only top-10
+
+    # Hard reject: if top-1 prediction is clearly non-reptile with >50% confidence
+    if top_preds:
+        top1_name = top_preds[0][1].lower().replace('_', ' ')
+        top1_prob = float(top_preds[0][2])
+        for nrk in NON_REPTILE_KEYWORDS:
+            if nrk in top1_name and top1_prob > 0.50:
+                return False   # Clearly not a reptile/amphibian
+
+    # Check if any top-10 class matches reptile/amphibian keywords with >=3% confidence
+    for (_cid, class_name, prob) in top_preds:
+        if float(prob) < 0.03:   # Require at least 3% confidence
+            continue
+        name_lower = class_name.lower().replace('_', ' ')
+        name_raw   = class_name.lower()
+        for keyword in IMAGENET_REPTILE_AMPHIBIAN_KEYWORDS:
+            kw = keyword.lower()
+            if kw in name_lower or kw in name_raw:
+                return True
+    return False
+
+@csrf_exempt
+def prediction(request):
+    image_url, animal_name, category, confidence_pct = None, None, None, None
+
+    if request.method == 'POST' and request.FILES.get('image'):
+        try:
+            model_path = os.path.join(settings.BASE_DIR, 'animal_classification_model.h5')
+            print(f"DEBUG: Starting prediction. Model path: {model_path}")
+
+            if not os.path.exists(model_path):
+                msg = f"Model file not found at {model_path}. Please train first."
+                print(f"ERROR: {msg}")
+                if 'application/json' in request.headers.get('Accept', ''):
+                    return JsonResponse({'status': 'error', 'message': msg}, status=400)
+                return render(request, 'users/detection.html', {'result': msg})
+
+            img_file = request.FILES['image']
+            img_path = default_storage.save('temp_image.jpg', img_file)
+            img_full_path = os.path.join(settings.MEDIA_ROOT, img_path)
+            image_url = os.path.join(settings.MEDIA_URL, img_path)
+            print(f"DEBUG: Image saved at {img_full_path}")
+
+            # ── STEP 1: Pre-filter (Validates if it's really a Reptile/Amphibian) ──
+            if not is_reptile_or_amphibian_imagenet(img_full_path):
+                msg = 'Invalid Image: This is not a Reptile or Amphibian.'
+                print(f"REJECTED: {msg}")
+                if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                    return JsonResponse({
+                        'status': 'error', 'message': msg, 'is_invalid': True,
+                        'image_url': request.build_absolute_uri(image_url)
+                    })
+                return render(request, 'users/detection.html', {'is_invalid': True, 'image_url': image_url})
+
+            # ── STEP 2: Species classification ──────────────────────────────────
+            model = ModelCache.get_custom_model()
+            if not model:
+                # Fallback if pre-load failed or model file is newly created
+                print("DEBUG: Custom model not pre-loaded. Loading now...")
+                model = load_model(model_path, compile=False)
+            
+            # Image Preprocessing
+            img = load_img(img_full_path, target_size=(224, 224))
+            img_array = img_to_array(img)
+            img_array = np.expand_dims(img_array, axis=0)
+            img_array = preprocess_input(img_array)
+
+            # Prediction
+            print("DEBUG: Running model.predict...")
+            preds = model.predict(img_array, verbose=0)
+            idx = np.argmax(preds, axis=1)[0]
+            confidence = float(preds[0][idx])
+            print(f"DEBUG: Predicted index: {idx}, Confidence: {confidence}")
+            
+            # ── STEP 3: Confidence threshold check ──────────────────────────────
+            # If the model is less than 60% sure, reject it as invalid/unknown
+            if confidence < 0.60:
+                msg = 'Inconclusive prediction: Accuracy too low. Please provide a clearer image.'
+                if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                    return JsonResponse({
+                        'status': 'error', 'message': msg, 'is_invalid': True,
+                        'image_url': request.build_absolute_uri(image_url)
+                    })
+                return render(request, 'users/detection.html', {'is_invalid': True, 'image_url': image_url})
+
+            # Map index to class name
+            if idx < len(CLASS_NAMES):
+                predicted_class_name = CLASS_NAMES[idx]
+            else:
+                predicted_class_name = "Unknown"
+
+            category = get_category(predicted_class_name)
+            print(f"DEBUG: Species: {predicted_class_name}, Category: {category}")
+
+            if category == 'Unknown':
+                msg = 'Invalid species detected: Category is Unknown.'
+                if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                    return JsonResponse({
+                        'status': 'error', 'message': msg, 'is_invalid': True,
+                        'image_url': request.build_absolute_uri(image_url)
+                    })
+                return render(request, 'users/detection.html', {'is_invalid': True, 'image_url': image_url})
+
+            # Formatting result
+            raw_name = predicted_class_name.replace('_', ' ').replace('-', ' ')
+            animal_name = ' '.join(word.capitalize() for word in raw_name.split())
+            confidence_pct = f"{confidence * 100:.2f}%"
+
+            if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                return JsonResponse({
+                    'animal_name': animal_name,
+                    'category': category,
+                    'confidence_pct': confidence_pct,
+                    'image_url': request.build_absolute_uri(image_url),
+                    'status': 'success'
+                })
+
+            return render(request, 'users/detection.html', {
+                'animal_name': animal_name, 'category': category,
+                'confidence_pct': confidence_pct, 'image_url': image_url,
+            })
+
+        except Exception as e:
+            msg = f"Prediction Error: {str(e)}"
+            print(f"ERROR: {msg}") 
+            import traceback
+            traceback.print_exc()
+            if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                return JsonResponse({'status': 'error', 'message': msg}, status=500)
+            return render(request, 'users/detection.html', {'result': msg})
+
+    return render(request, 'users/detection.html', {})
+
+
+
+############################################################################################################################################
+# def ViewDataset(request):
+#     dataset = os.path.join(settings.MEDIA_ROOT, 'Filtered_ClassSurvey.csv')
+#     import pandas as pd
+#     df = pd.read_csv(dataset,nrows=100)
+#     df = df.to_html(index=None)
+#     return render(request, 'users/viewData.html', {'data': df})
+
+
+from django.shortcuts import render, redirect
+from .models import UserRegistrationModel
+from django.contrib import messages
+
+@csrf_exempt
+def UserRegisterActions(request):
+    if request.method == 'POST':
+        try:
+            if 'application/json' in request.content_type:
+                data = json.loads(request.body)
+            else:
+                data = request.POST
+
+            user = UserRegistrationModel(
+                name=data.get('name', data.get('loginid')),
+                loginid=data.get('loginid'),
+                password=data.get('password'),
+                mobile=data.get('mobile', str(random.randint(1000000000, 9999999999))),
+                email=data.get('email'),
+                locality=data.get('locality', 'N/A'),
+                address=data.get('address', 'N/A'),
+                city=data.get('city', 'N/A'),
+                state=data.get('state', 'N/A'),
+                status='waiting'
+            )
+            user.save()
+            
+            if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                return JsonResponse({'status': 'success', 'message': 'Registration successful!'})
+            
+            messages.success(request,"Registration successful!")
+        except Exception as e:
+            if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                return JsonResponse({'status': 'error', 'message': str(e)}, status=400)
+            messages.error(request, str(e))
+            
+    return render(request, 'UserRegistrations.html') 
+
+
+@csrf_exempt
+def UserLoginCheck(request):
+    if request.method == "POST":
+        try:
+            if 'application/json' in request.content_type:
+                data = json.loads(request.body)
+                loginid = data.get('loginid')
+                pswd = data.get('pswd')
+            else:
+                loginid = request.POST.get('loginid')
+                pswd = request.POST.get('pswd')
+            
+            print(f"Login Attempt: ID={loginid}, Pswd={pswd}")
+            
+            try:
+                check = UserRegistrationModel.objects.get(loginid=loginid, password=pswd)
+                status = check.status
+                print(f"User Found: {check.name}, Status: {status}")
+                
+                if status == "activated":
+                    request.session['id'] = check.id
+                    request.session['loggeduser'] = check.name
+                    request.session['loginid'] = loginid
+                    request.session['email'] = check.email
+                    
+                    if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                        return JsonResponse({
+                            'status': 'success',
+                            'user_id': check.id,
+                            'name': check.name,
+                            'email': check.email
+                        })
+                    return render(request, 'users/UserHomePage.html', {})
+                else:
+                    msg = 'Your account is not yet activated.'
+                    if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                        return JsonResponse({'status': 'error', 'message': msg}, status=403)
+                    messages.success(request, msg)
+                    return render(request, 'UserLogin.html')
+            
+            except UserRegistrationModel.DoesNotExist:
+                msg = 'Invalid Login ID or Password'
+                if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                    return JsonResponse({'status': 'error', 'message': msg}, status=401)
+                messages.error(request, msg)
+                return render(request, 'UserLogin.html')
+
+        except Exception as e:
+            error_msg = f"INTERNAL ERROR: {str(e)}"
+            print(error_msg)
+            if 'application/json' in request.headers.get('Accept', '') or request.content_type == 'application/json':
+                return JsonResponse({'status': 'error', 'message': error_msg}, status=500)
+            messages.error(request, error_msg)
+            return render(request, 'UserLogin.html', {})
+            
+    return render(request, 'UserLogin.html', {})
+
+
+def UserHome(request):
+    return render(request, 'users/UserHomePage.html', {})
+
+
+def index(request):
+    return render(request,"index.html")

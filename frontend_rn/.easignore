@@ -1,0 +1,15 @@
+# EAS Ignore
+# These paths are parsed correctly relative to the project root
+backend/
+frontend_rn/node_modules/
+node_modules/
+frontend_rn/.expo/
+frontend_rn/dist/
+*.h5
+*.data-*
+*.index
+checkpoint
+.venv/
+.expo/
+dist/
+web-build/
