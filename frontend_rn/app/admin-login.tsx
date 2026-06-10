@@ -8,27 +8,27 @@ export default function AdminLoginScreen() {
   const { width } = useWindowDimensions();
   const isDesktop = width >= 768;
   const [loginid, setLoginid] = useState('');
-  const [pswd,    setPswd]    = useState('');
+  const [pswd, setPswd] = useState('');
   const [loading, setLoading] = useState(false);
   const [focused, setFocused] = useState<string | null>(null);
-  const fade   = useRef(new Animated.Value(0)).current;
+  const fade = useRef(new Animated.Value(0)).current;
   const slideY = useRef(new Animated.Value(50)).current;
   const shieldPulse = useRef(new Animated.Value(1)).current;
-  const btnScale    = useRef(new Animated.Value(1)).current;
+  const btnScale = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     Animated.parallel([
-      Animated.timing(fade,   { toValue: 1, duration: 700, useNativeDriver: true }),
+      Animated.timing(fade, { toValue: 1, duration: 700, useNativeDriver: true }),
       Animated.timing(slideY, { toValue: 0, duration: 700, useNativeDriver: true }),
     ]).start();
     Animated.loop(Animated.sequence([
       Animated.timing(shieldPulse, { toValue: 1.1, duration: 1800, useNativeDriver: true }),
-      Animated.timing(shieldPulse, { toValue: 1,   duration: 1800, useNativeDriver: true }),
+      Animated.timing(shieldPulse, { toValue: 1, duration: 1800, useNativeDriver: true }),
     ])).start();
   }, []);
 
-  const pressIn  = () => Animated.spring(btnScale, { toValue: 0.96, useNativeDriver: true }).start();
-  const pressOut = () => Animated.spring(btnScale, { toValue: 1,    useNativeDriver: true }).start();
+  const pressIn = () => Animated.spring(btnScale, { toValue: 0.96, useNativeDriver: true }).start();
+  const pressOut = () => Animated.spring(btnScale, { toValue: 1, useNativeDriver: true }).start();
 
   const handleLogin = async () => {
     if (!loginid.trim() || !pswd.trim()) { Alert.alert('Error', 'Please enter Admin ID and Password'); return; }
@@ -88,16 +88,16 @@ export default function AdminLoginScreen() {
             </TouchableOpacity>
           </Animated.View>
 
-          <Text style={styles.hint}>Default: admin / admin</Text>
+          <Text style={styles.hint}></Text>
         </Animated.View>
       </ScrollView>
     </View>
-  );
+  )
 }
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: '#fffbeb', overflow: 'hidden' as any },
-  blob:   { position: 'absolute', borderRadius: 999, width: 320, height: 320 },
+  blob: { position: 'absolute', borderRadius: 999, width: 320, height: 320 },
   scroll: { flexGrow: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
   card: {
     backgroundColor: '#fff', borderRadius: 28, padding: 32,
@@ -107,15 +107,15 @@ const styles = StyleSheet.create({
   },
   cardDesktop: { maxWidth: 540, padding: 52 },
   topBar: { position: 'absolute', top: 0, left: 0, right: 0, height: 5, backgroundColor: '#f59e0b' },
-  logo:   { fontSize: 64, marginBottom: 14, marginTop: 8 },
-  title:  { fontSize: 26, fontWeight: '800', color: '#78350f', marginBottom: 10 },
+  logo: { fontSize: 64, marginBottom: 14, marginTop: 8 },
+  title: { fontSize: 26, fontWeight: '800', color: '#78350f', marginBottom: 10 },
   restrictBadge: {
     backgroundColor: '#fef3c7', borderWidth: 1, borderColor: '#fcd34d',
     borderRadius: 20, paddingHorizontal: 16, paddingVertical: 6, marginBottom: 28,
   },
   restrictText: { color: '#92400e', fontSize: 13, fontWeight: '700' },
   fieldWrap: { marginBottom: 16, width: '100%' },
-  label:     { fontSize: 13, fontWeight: '700', marginBottom: 7, letterSpacing: 0.3 },
+  label: { fontSize: 13, fontWeight: '700', marginBottom: 7, letterSpacing: 0.3 },
   input: {
     backgroundColor: '#f9fafb', borderWidth: 1.5, borderColor: '#e5e7eb',
     borderRadius: 12, color: '#111827', padding: 13, fontSize: 15, width: '100%',
@@ -128,5 +128,5 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.35, shadowRadius: 16, elevation: 10,
   },
   btnText: { color: '#fff', fontSize: 17, fontWeight: '800' },
-  hint:    { color: '#9ca3af', fontSize: 12 },
+  hint: { color: '#9ca3af', fontSize: 12 },
 });
