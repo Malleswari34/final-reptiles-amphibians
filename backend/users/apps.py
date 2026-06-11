@@ -12,9 +12,9 @@ class UsersConfig(AppConfig):
         
         # Load models in a background thread so Django starts quickly
         def load_models():
-            print("🕒 Starting background model pre-loading...")
+            print("[INFO] Starting background model pre-loading...")
             ModelCache.get_inet_model()
             ModelCache.get_custom_model()
-            print("✅ Background model pre-loading complete.")
+            print("[SUCCESS] Background model pre-loading complete.")
 
         threading.Thread(target=load_models, daemon=True).start()

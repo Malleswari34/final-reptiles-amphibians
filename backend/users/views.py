@@ -40,7 +40,7 @@ class ModelCache:
     @classmethod
     def get_inet_model(cls):
         if cls._inet_model is None:
-            print("🚀 PRE-LOADING: ImageNet Filter Model...")
+            print("[INFO] PRE-LOADING: ImageNet Filter Model...")
             cls._inet_model = MobileNetV2(weights='imagenet', include_top=True)
         return cls._inet_model
 
@@ -49,7 +49,7 @@ class ModelCache:
         if cls._custom_model is None:
             model_path = os.path.join(settings.BASE_DIR, 'animal_classification_model.h5')
             if os.path.exists(model_path):
-                print(f"🚀 PRE-LOADING: Custom Animal Model from {model_path}...")
+                print(f"[INFO] PRE-LOADING: Custom Animal Model from {model_path}...")
                 
                 # Handling custom layers for MobileNet loading
                 class FixedDepthwiseConv2D(DepthwiseConv2D):
@@ -62,7 +62,7 @@ class ModelCache:
                     custom_objects={'DepthwiseConv2D': FixedDepthwiseConv2D}
                 )
             else:
-                print("⚠️  WARNING: Custom model file not found!")
+                print("[WARNING] Custom model file not found!")
         return cls._custom_model
 
 def Training(request):

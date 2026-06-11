@@ -1,8 +1,21 @@
 import axios from 'axios';
+import { Platform } from 'react-native';
 
-// Replace with your local IP address for physical device testing
-// Use 10.0.2.2 for Android Emulator, or localhost for Web
-const BASE_URL = 'https://final-reptiles-amphibians-production.up.railway.app';
+const DEV_IP = '192.168.43.165';
+
+let BASE_URL = 'http://localhost:8000';
+
+if (Platform.OS === 'web') {
+  if (typeof window !== 'undefined' && window.location) {
+    BASE_URL = `http://${window.location.hostname}:8000`;
+  } else {
+    BASE_URL = 'http://localhost:8000';
+  }
+} else {
+  BASE_URL = `http://${DEV_IP}:8000`;
+}
+
+console.log('[API] Configured Base URL:', BASE_URL);
 
 const api = axios.create({
   baseURL: BASE_URL,
